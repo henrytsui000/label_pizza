@@ -1655,10 +1655,10 @@ def sync_schemas(*, schemas_path: str | Path | None = None, schemas_data: List[D
         allowed = required | optional
         schema_keys = set(s.keys())
 
-        if schema_keys != required:
-            missing = required - schema_keys
-            extra = schema_keys - required
-            
+        missing = required - schema_keys
+        extra = schema_keys - allowed
+
+        if missing or extra:
             error_parts = []
             if missing:
                 error_parts.append(f"missing: {', '.join(missing)}")
