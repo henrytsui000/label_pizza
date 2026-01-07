@@ -38,6 +38,19 @@ from label_pizza.accuracy_analytics import display_user_accuracy_simple, display
 # Video Display Functions
 ###############################################################################
 
+def filter_disabled_options(original_options: list, display_values: list) -> tuple:
+    """Remove options containing 'This is not an option' from choices."""
+    filtered_original = []
+    filtered_display = []
+    
+    for orig, disp in zip(original_options, display_values):
+        if "This is not an option" not in str(disp):
+            filtered_original.append(orig)
+            filtered_display.append(disp)
+    
+    return filtered_original, filtered_display
+
+
 @st.fragment
 def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: str, mode: str):
     """Display a single video-answer pair - FULLY OPTIMIZED WITH SINGLE BATCH OPERATION"""
@@ -80,9 +93,9 @@ def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: 
             for group in question_groups
         ]
         
-        # Progress display format
+        # Progress display format with anchor for scrolling
         st.markdown(f"""
-        <div style="{get_card_style('#B180FF')}text-align: center;">
+        <div id="video_{video['id']}" style="{get_card_style('#B180FF')}text-align: center;">
             <div style="color: #5C00BF; font-weight: 500; font-size: 0.95rem;">
                 {video['uid']} - {' | '.join(completion_details)} - Progress: {completed_count}/{total_count} Complete
             </div>
@@ -143,7 +156,6 @@ def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: 
         if st.button("🔄 Refresh Page", key=f"refresh_{video['id']}_{project_id}"):
             st.rerun()
 def display_question_group_in_fixed_container(video: Dict, project_id: int, user_id: int, group_id: int, role: str, mode: str, container_height: int=None, bulk_cache_data: Dict = None, group_index: int = 0):
-def display_question_group_in_fixed_container(video: Dict, project_id: int, user_id: int, group_id: int, role: str, mode: str, container_height: int=None, bulk_cache_data: Dict = None):
     """Display question group content with preloaded answers support - FIXED CUSTOM DISPLAY HANDLING"""
 
     try:
@@ -718,6 +730,8 @@ def display_single_choice_question(
 
     original_options = question["options"]
     display_values = question.get("display_values", original_options)
+    
+    original_options, display_values = filter_disabled_options(original_options, display_values)
     
     display_to_value = dict(zip(display_values, original_options))
     value_to_display = dict(zip(original_options, display_values))
@@ -3536,9 +3550,11 @@ def display_project_view(user_id: int, role: str):
             with get_db_session() as session:
                 schema_details = SchemaService.get_schema_details(schema_id=project["schema_id"], session=session)
             instructions_url = schema_details.get("instructions_url")
+            cheat_sheet_markdown = schema_details.get("cheat_sheet_markdown")
         except Exception as e:
             print(f"Error getting schema details: {e}")
             instructions_url = None
+            cheat_sheet_markdown = None
     except ValueError as e:
         st.error(f"Error loading project: {str(e)}")
         return
@@ -3683,7 +3699,7 @@ def display_project_view(user_id: int, role: str):
             display_auto_submit_tab(project_id=project_id, user_id=user_id, role=role, videos=videos)
         
         with instruction_tab:
-            display_instruction_tab_content(instructions_url=instructions_url)
+            display_instruction_tab_content(instructions_url=instructions_url, cheat_sheet_markdown=cheat_sheet_markdown)
     
     elif role == "meta_reviewer":
         if mode == "Training":
@@ -3739,13 +3755,13 @@ def display_project_view(user_id: int, role: str):
             display_layout_tab_content(videos=videos, role=role)
         
         with instruction_tab:
-            display_instruction_tab_content(instructions_url=instructions_url)
+            display_instruction_tab_content(instructions_url=instructions_url, cheat_sheet_markdown=cheat_sheet_markdown)
     
     else:  # Annotator role
         instruction_tab, layout_tab, sort_tab, auto_submit_tab = st.tabs(["📖 Instructions", "🎛️ Layout Settings", "🔄 Sort", "⚡ Auto-Submit"])
         
         with instruction_tab:
-            display_instruction_tab_content(instructions_url=instructions_url)
+            display_instruction_tab_content(instructions_url=instructions_url, cheat_sheet_markdown=cheat_sheet_markdown)
         
         with layout_tab:
             display_layout_tab_content(videos=videos, role=role)
@@ -4379,15 +4395,22 @@ def display_instruction_tab_content(instructions_url: Optional[str], cheat_sheet
                  disabled=True, 
                  use_container_width=True,
                  help="No instructions URL configured for this project")
-        
-        st.markdown(f"""
-        <div style="margin-top: 16px; padding: 12px; background: #fff3cd; border-radius: 8px; border-left: 4px solid #ffc107;">
-            <p style="margin: 0; color: #856404; font-size: 0.9rem;">
-                ⚠️ <strong>No instructions available</strong><br>
-                Contact your project administrator to add instructions for this project.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+
+        # Only show "No instructions available" if there's no cheat sheet either
+        if not (cheat_sheet_markdown and cheat_sheet_markdown.strip()):
+            st.markdown(f"""
+            <div style="margin-top: 16px; padding: 12px; background: #fff3cd; border-radius: 8px; border-left: 4px solid #ffc107;">
+                <p style="margin: 0; color: #856404; font-size: 0.9rem;">
+                    ⚠️ <strong>No instructions available</strong><br>
+                    Contact your project administrator to add instructions for this project.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+    # Display cheat sheet if available
+    if cheat_sheet_markdown and cheat_sheet_markdown.strip():
+        st.markdown("---")
+        with st.expander("📋 **Quick Reference Cheat Sheet**", expanded=True):
+            st.markdown(cheat_sheet_markdown, unsafe_allow_html=True)
     
 ###############################################################################
 # PROJECT DASHBOARD FUNCTIONS

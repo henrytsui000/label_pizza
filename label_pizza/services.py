@@ -16,6 +16,11 @@ from dotenv import load_dotenv
 import importlib.util
 import sys
 from pathlib import Path
+import re
+
+def natural_sort_key(s: str):
+    """Key function for natural sorting (abc 2 before abc 13)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
 
 load_dotenv()
 
@@ -1778,6 +1783,7 @@ class SchemaService:
             name: str,
             question_group_ids: List[int],
             instructions_url: Optional[str] = None,
+            cheat_sheet_markdown: Optional[str] = None,
             has_custom_display: bool = False,
             session: Session = None
     ) -> None:
@@ -1790,6 +1796,7 @@ class SchemaService:
             name: Schema name
             question_group_ids: List of question group IDs in desired order
             instructions_url: URL for schema instructions
+            cheat_sheet_markdown: Markdown content for cheat sheet
             has_custom_display: Whether schema has custom display
             session: Database session
 
@@ -1869,6 +1876,7 @@ class SchemaService:
         name: str,
         question_group_ids: List[int],
         instructions_url: Optional[str] = None,
+        cheat_sheet_markdown: Optional[str] = None,
         has_custom_display: bool = False,
         session: Session = None
     ) -> Schema:
@@ -1878,6 +1886,7 @@ class SchemaService:
             name: Schema name
             question_group_ids: List of question group IDs in desired order
             instructions_url: URL for schema instructions
+            cheat_sheet_markdown: Markdown content for cheat sheet
             has_custom_display: Whether schema has custom display
             session: Database session
 
@@ -1888,10 +1897,10 @@ class SchemaService:
             ValueError: If schema with same name exists or validation fails
         """
         # First, verify all parameters (will raise ValueError if validation fails)
-        SchemaService.verify_create_schema(name, question_group_ids, instructions_url, has_custom_display, session)
+        SchemaService.verify_create_schema(name, question_group_ids, instructions_url, cheat_sheet_markdown, has_custom_display, session)
 
         # Create schema object
-        schema = Schema(name=name, instructions_url=instructions_url, has_custom_display=has_custom_display)
+        schema = Schema(name=name, instructions_url=instructions_url, cheat_sheet_markdown=cheat_sheet_markdown, has_custom_display=has_custom_display)
         session.add(schema)
         session.flush()  # Get schema ID
 
@@ -1929,6 +1938,7 @@ class SchemaService:
             "id": schema.id,
             "name": schema.name,
             "instructions_url": schema.instructions_url,
+            "cheat_sheet_markdown": schema.cheat_sheet_markdown,
             "created_at": schema.created_at,
             "updated_at": schema.updated_at,
             "has_custom_display": schema.has_custom_display,
@@ -1940,6 +1950,7 @@ class SchemaService:
         schema_id: int,
         name: Optional[str] = None,
         instructions_url: Optional[str] = None,
+        cheat_sheet_markdown: Optional[str] = None,
         has_custom_display: Optional[bool] = None,
         is_archived: Optional[bool] = None,
         session: Session = None
@@ -1953,6 +1964,7 @@ class SchemaService:
             schema_id: Schema ID
             name: New schema name (optional)
             instructions_url: New instructions URL (optional, use empty string to clear)
+            cheat_sheet_markdown: New cheat sheet markdown (optional, use empty string to clear)
             has_custom_display: New custom display flag (optional)
             is_archived: New archive status (optional)
             session: Database session
@@ -2027,6 +2039,7 @@ class SchemaService:
         schema_id: int, 
         name: Optional[str] = None,
         instructions_url: Optional[str] = None,
+        cheat_sheet_markdown: Optional[str] = None,
         has_custom_display: Optional[bool] = None,
         is_archived: Optional[bool] = None,
         session: Session = None
@@ -2037,6 +2050,7 @@ class SchemaService:
             schema_id: Schema ID
             name: New schema name (optional)
             instructions_url: New instructions URL (optional, use empty string to clear)
+            cheat_sheet_markdown: New cheat sheet markdown (optional, use empty string to clear)
             has_custom_display: New custom display flag (optional)
             is_archived: New archive status (optional)
             session: Database session
@@ -2046,7 +2060,7 @@ class SchemaService:
         """
         # First, verify all parameters (will raise ValueError if validation fails)
         SchemaService.verify_edit_schema(
-            schema_id, name, instructions_url, has_custom_display, is_archived, session
+            schema_id, name, instructions_url, cheat_sheet_markdown, has_custom_display, is_archived, session
         )
         
         # Get schema object for updating
@@ -2063,7 +2077,15 @@ class SchemaService:
             else:
                 # Empty string means clear the URL
                 schema.instructions_url = None
-        
+
+        # Update cheat sheet markdown if provided
+        if cheat_sheet_markdown is not None:
+            if cheat_sheet_markdown.strip():
+                schema.cheat_sheet_markdown = cheat_sheet_markdown.strip()
+            else:
+                # Empty string means clear the cheat sheet
+                schema.cheat_sheet_markdown = None
+
         # Update custom display flag if provided
         if has_custom_display is not None:
             schema.has_custom_display = has_custom_display
@@ -3454,6 +3476,36 @@ class CustomDisplayService:
             })
         
         return result
+
+    @staticmethod
+    def get_custom_display_map_for_project(
+        project_id: int,
+        session: Session
+    ) -> Dict[Tuple[int, int], Dict[str, Any]]:
+        """Get all custom displays for a project as a lookup map.
+
+        This is a lightweight batch fetch method optimized for sync operations.
+        Returns a dictionary keyed by (video_id, question_id) for O(1) lookups.
+
+        Args:
+            project_id: Project ID
+            session: Database session
+
+        Returns:
+            Dictionary mapping (video_id, question_id) -> {display_text, display_values}
+        """
+        overrides = session.scalars(
+            select(ProjectVideoQuestionDisplay)
+            .where(ProjectVideoQuestionDisplay.project_id == project_id)
+        ).all()
+
+        return {
+            (override.video_id, override.question_id): {
+                "display_text": override.custom_display_text,
+                "display_values": override.custom_option_display_map
+            }
+            for override in overrides
+        }
 
 
 class AuthService:
@@ -8910,8 +8962,9 @@ class ProjectGroupService:
             else:
                 grouped_projects["Unassigned"].append(project_dict)
         
-        # Remove empty groups
-        return {name: projects for name, projects in grouped_projects.items() if projects}
+        # Remove empty groups and sort projects by name within each group
+        return {name: sorted(projects, key=lambda p: natural_sort_key(p["name"]))
+                for name, projects in grouped_projects.items() if projects}
 
     @staticmethod
     def get_project_group_counts(session: Session) -> Dict[str, int]:

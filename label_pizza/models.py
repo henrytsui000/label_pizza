@@ -103,6 +103,7 @@ class Schema(Base):
     id = Column(Integer, primary_key=True)
     name = Column(Text, unique=True, nullable=False)
     instructions_url = Column(Text, nullable=True)
+    cheat_sheet_markdown = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=now)
     updated_at = Column(DateTime(timezone=True), default=now, onupdate=now)
     has_custom_display = Column(Boolean, default=False)
