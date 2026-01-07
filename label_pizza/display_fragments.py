@@ -98,7 +98,21 @@ def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: 
             video_height = custom_video_player(video["url"], video["uid"], autoplay=autoplay, loop=loop, show_share_button=True)
         
         with answer_col:
-            tab_names = [group['Display Title'] for group in question_groups]
+            # Check which groups have been completed
+            submission_key = f"completed_groups_{video['id']}_{project_id}_{role}"
+            
+            if submission_key not in st.session_state:
+                st.session_state[submission_key] = set()
+            
+            # Add completion indicators to tab names
+            tab_names = []
+            for group in question_groups:
+                group_id = group["ID"]
+                if group_id in st.session_state[submission_key]:
+                    tab_names.append(f"✅ {group['Display Title']}")
+                else:
+                    tab_names.append(f"📝 {group['Display Title']}")
+            
             tabs = st.tabs(tab_names)
             
             for tab, group in zip(tabs, question_groups):
@@ -112,7 +126,8 @@ def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: 
                         role=role, 
                         mode=mode, 
                         container_height=video_height,
-                        bulk_cache_data=bulk_video_data  # Pass the complete bulk data
+                        bulk_cache_data=bulk_video_data,
+                        group_index=question_groups.index(group)
                     )
         
         if st.session_state.get(f"rerun_needed_{project_id}_{user_id}", False):
@@ -127,7 +142,7 @@ def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: 
         st.error(f"Error loading project data: {str(e)}")
         if st.button("🔄 Refresh Page", key=f"refresh_{video['id']}_{project_id}"):
             st.rerun()
-
+def display_question_group_in_fixed_container(video: Dict, project_id: int, user_id: int, group_id: int, role: str, mode: str, container_height: int=None, bulk_cache_data: Dict = None, group_index: int = 0):
 def display_question_group_in_fixed_container(video: Dict, project_id: int, user_id: int, group_id: int, role: str, mode: str, container_height: int=None, bulk_cache_data: Dict = None):
     """Display question group content with preloaded answers support - FIXED CUSTOM DISPLAY HANDLING"""
 
@@ -367,7 +382,11 @@ def display_question_group_in_fixed_container(video: Dict, project_id: int, user
                     for i, question in enumerate(questions):
                         question_id = question["id"]
                         question_text = question["text"]
-                        existing_value = existing_answers.get(question_text, "")
+
+                        # Check for AI prefilled value first, then existing answer
+                        ai_prefill_key = f"ai_prefill_{video['id']}_{question_id}"
+                        ai_prefill_value = st.session_state.get(ai_prefill_key)
+                        existing_value = ai_prefill_value if ai_prefill_value else existing_answers.get(question_text, "")
                         gt_value = gt_answers.get(question_text, "")
                         
                         # Get admin info from batch result
@@ -501,6 +520,10 @@ def display_question_group_in_fixed_container(video: Dict, project_id: int, user
                         for key in keys_to_remove:
                             del preloaded_answers[key]
                         st.session_state[f"current_preloaded_answers_{role}_{project_id}"] = preloaded_answers
+                    submission_key = f"completed_groups_{video['id']}_{project_id}_{role}"
+                    if submission_key not in st.session_state:
+                        st.session_state[submission_key] = set()
+                    st.session_state[submission_key].add(group_index)
                 
                     st.session_state[f"rerun_needed_{project_id}_{user_id}"] = True
                     
@@ -3540,6 +3563,35 @@ def display_project_view(user_id: int, role: str):
     else:
         custom_info("🔍 Review Mode - Help create the ground truth dataset!")
     
+    # Show notification if LLM just generated answers
+    if st.session_state.get(f"llm_just_generated_{project_id}"):
+        scroll_to_video_id = st.session_state.get(f"scroll_to_video_{project_id}")
+        st.success("✅ LLM answers have been auto-filled! The page will scroll to the video.")
+
+        # Add JavaScript to scroll to the video
+        if scroll_to_video_id:
+            st.markdown(f"""
+            <script>
+                setTimeout(function() {{
+                    const element = document.getElementById('video_{scroll_to_video_id}');
+                    if (element) {{
+                        element.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                        element.style.border = '3px solid #9553FE';
+                        element.style.boxShadow = '0 0 20px rgba(149, 83, 254, 0.5)';
+                        setTimeout(function() {{
+                            element.style.border = '';
+                            element.style.boxShadow = '';
+                        }}, 3000);
+                    }}
+                }}, 500);
+            </script>
+            """, unsafe_allow_html=True)
+
+        # Clear the flags
+        del st.session_state[f"llm_just_generated_{project_id}"]
+        if f"scroll_to_video_{project_id}" in st.session_state:
+            del st.session_state[f"scroll_to_video_{project_id}"]
+
     # RUN AUTO-SUBMIT ONCE AT PROJECT ENTRY FOR ANNOTATORS
     if role == "annotator" and mode == "Annotation":
         auto_submit_key = f"auto_submit_done_{project_id}_{user_id}"
@@ -3548,7 +3600,10 @@ def display_project_view(user_id: int, role: str):
             st.session_state[auto_submit_key] = True
     
     display_project_progress(user_id=user_id, project_id=project_id, role=role)
-    
+
+    # Always display AI Assistant in sidebar when annotating
+    display_llm_sidebar(project_id=project_id, user_id=user_id, role=role, videos=[])
+
     videos = get_project_videos(project_id=project_id)
     
     if not videos:
@@ -3781,8 +3836,528 @@ def display_project_view(user_id: int, role: str):
     
     display_pagination_controls(current_page, total_pages, page_key, role, project_id, "bottom", video_list_info_str)
 
-def display_instruction_tab_content(instructions_url: Optional[str]):
-    """Display instruction tab content with external URL button"""
+
+def display_llm_sidebar(project_id: int, user_id: int, role: str, videos: List[Dict]):
+    """Display LLM generation controls in the sidebar
+
+    Args:
+        project_id: Project ID
+        user_id: User ID
+        role: User role
+        videos: List of videos
+    """
+
+    # Fetch videos if not passed
+    if not videos:
+        videos = get_project_videos(project_id=project_id)
+
+    # Use Streamlit's built-in sidebar
+    with st.sidebar:
+        # Add CSS to hide original sidebar content and show only AI Assistant
+        st.markdown("""
+        <style>
+        /* Hide all original sidebar content */
+        [data-testid="stSidebar"] [data-testid="stSidebarContent"] > div:first-child {
+            display: none !important;
+        }
+
+        /* Show the AI section */
+        [data-testid="stSidebar"] [data-testid="stSidebarContent"] > div:last-child {
+            display: block !important;
+        }
+
+        /* Compact styling for AI panel */
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 {
+            font-size: 1rem !important;
+            color: #9553FE !important;
+            border-bottom: 2px solid #9553FE;
+            padding-bottom: 6px;
+            margin-bottom: 10px;
+        }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h4 {
+            font-size: 0.85rem !important;
+            margin-top: 8px !important;
+            margin-bottom: 4px !important;
+        }
+        [data-testid="stSidebar"] button {
+            font-size: 0.8rem !important;
+        }
+        [data-testid="stSidebar"] input,
+        [data-testid="stSidebar"] select,
+        [data-testid="stSidebar"] textarea {
+            font-size: 0.8rem !important;
+        }
+        [data-testid="stSidebar"] label {
+            font-size: 0.8rem !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        st.markdown("### 🤖 AI Assistant")
+
+        display_llm_generation_content(project_id, user_id, role, videos)
+
+
+@st.fragment
+def display_llm_generation_content(project_id: int, user_id: int, role: str, videos: List[Dict]):
+    """Display LLM-based annotation generation interface"""
+    from label_pizza.gemini_service import GeminiService, test_gemini_connection
+    from label_pizza.models import Question
+
+    st.markdown("#### 🔑 API Config")
+
+    api_key = st.text_input(
+        "API Key",
+        type="password",
+        key=f"llm_api_key_{project_id}_{user_id}",
+        help="Get at: https://aistudio.google.com/app/apikey",
+        placeholder="Paste API key..."
+    )
+
+    model_options = [
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+    ]
+    selected_model = st.selectbox(
+        "Model",
+        model_options,
+        key=f"llm_model_{project_id}_{user_id}",
+        help="Select Gemini model",
+        label_visibility="collapsed"
+    )
+
+    if api_key and st.button("🔍 Test", use_container_width=True):
+        with st.spinner("Testing..."):
+            result = test_gemini_connection(api_key)
+            if result["status"] == "success":
+                st.success("✅ Connected!")
+            else:
+                st.error(f"❌ Failed")
+
+    st.markdown("---")
+
+    # Answer existing questions mode
+    st.markdown("#### 📹 Select Video")
+
+    # Create video options
+    video_options = {f"{v['uid']}": v for v in videos}
+    selected_video_uid = st.selectbox(
+        "Video",
+        options=list(video_options.keys()),
+        key=f"llm_selected_video_{project_id}_{user_id}",
+        help="Choose video to analyze",
+        label_visibility="collapsed"
+    )
+
+    selected_video = video_options[selected_video_uid]
+
+    st.markdown("---")
+    st.markdown("#### 📝 Select Questions")
+
+    # Get all questions for this project
+    try:
+        project_questions = get_project_questions_cached(project_id=project_id)
+
+        if not project_questions:
+            st.warning("No questions")
+            return
+
+        # Group questions by question group
+        question_groups_dict = {}
+        for q in project_questions:
+            group_title = q.get('group_title', 'Ungrouped')
+            if group_title not in question_groups_dict:
+                question_groups_dict[group_title] = []
+            question_groups_dict[group_title].append(q)
+
+        # Display questions with multiselect by group
+        selected_questions = []
+
+        for group_title, questions in question_groups_dict.items():
+            with st.expander(f"📂 {group_title} ({len(questions)})", expanded=True):
+                for q in questions:
+                    is_selected = st.checkbox(
+                        f"{q['text'][:50]}..." if len(q['text']) > 50 else q['text'],
+                        key=f"llm_q_select_{project_id}_{q['id']}",
+                        help=f"Full: {q['text']}\nType: {q['type']}"
+                    )
+                    if is_selected:
+                        selected_questions.append(q)
+
+        if not selected_questions:
+            st.info("☝️ Check questions")
+        else:
+            st.success(f"✅ {len(selected_questions)} selected")
+
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return
+
+    st.markdown("---")
+    st.markdown("#### 💬 Context (Optional)")
+
+    generation_prompt = st.text_area(
+        "Prompt",
+        value="""Watch video carefully. For multiple choice, select exact option. For description, be clear and concise.""",
+        height=80,
+        key=f"llm_answer_prompt_{project_id}_{user_id}",
+        help="Add context for AI",
+        label_visibility="collapsed"
+    )
+
+    st.markdown("---")
+
+    # Answer Questions
+    if st.button(
+        "✨ Generate Answers",
+        key=f"llm_answer_btn_{project_id}_{user_id}",
+        type="primary",
+        use_container_width=True,
+        disabled=not api_key or not selected_questions
+    ):
+        # Trigger answer generation
+        answer_existing_questions_with_llm(
+            project_id=project_id,
+            user_id=user_id,
+            api_key=api_key,
+            model_name=selected_model,
+            video=selected_video,
+            questions=selected_questions,
+            custom_prompt=generation_prompt,
+            role=role
+        )
+
+    st.caption("💡 Auto-fills answers & scrolls to video")
+
+    # Display help section
+    with st.expander("📚 Help"):
+        st.markdown("""
+        **Quick Start:**
+        1. Get API key at [Google AI Studio](https://aistudio.google.com/app/apikey)
+        2. Enter key above
+        3. Select video & questions
+        4. Click Generate
+
+        **Notes:**
+        - ✅ Free tier: 1500 requests/day
+        - ✅ Auto-fills exact options
+        - ⏱️ Takes ~30-60 sec/video
+        """)
+
+
+def generate_llm_annotations(
+    project_id: int,
+    user_id: int,
+    api_key: str,
+    model_name: str,
+    prompt: str,
+    num_questions: int,
+    scope: str,
+    videos: List[Dict],
+    role: str
+):
+    """Generate annotations using Gemini API and store as questions"""
+    from label_pizza.gemini_service import GeminiService
+    from label_pizza.models import Question, QuestionGroup
+    from label_pizza.db import SessionLocal
+    from sqlalchemy import text
+    import json
+
+    if not api_key:
+        st.error("Please enter your Gemini API key")
+        return
+
+    # Initialize Gemini service
+    try:
+        gemini = GeminiService(api_key, model_name=model_name)
+    except Exception as e:
+        st.error(f"Failed to initialize Gemini service: {str(e)}")
+        return
+
+    # Determine target videos based on scope
+    if scope == "All videos in project":
+        target_videos = videos
+    else:  # Current page of videos
+        videos_per_page = st.session_state.get(f"{role}_per_page", min(10, len(videos)))
+        page_key = f"{role}_current_page_{project_id}"
+        current_page = st.session_state.get(page_key, 0)
+        start_idx = current_page * videos_per_page
+        end_idx = min(start_idx + videos_per_page, len(videos))
+        target_videos = videos[start_idx:end_idx]
+
+    if not target_videos:
+        st.warning("No videos to process")
+        return
+
+    # Progress tracking
+    progress_bar = st.progress(0)
+    status_placeholder = st.empty()
+
+    generated_questions = []
+
+    for idx, video in enumerate(target_videos):
+        status_placeholder.write(f"Processing video {idx + 1}/{len(target_videos)}: {video['uid']}")
+
+        try:
+            # Generate questions for this video
+            result = gemini.generate_questions_from_video(
+                video_url=video['url'],
+                prompt=prompt,
+                num_questions=num_questions,
+                timeout=120
+            )
+
+            if result["status"] == "success":
+                # Store generated questions with video reference
+                for question in result["questions"]:
+                    question["video_uid"] = video["uid"]
+                    question["video_id"] = video["id"]
+                    generated_questions.append(question)
+
+                status_placeholder.success(f"✅ Generated {len(result['questions'])} questions for {video['uid']}")
+            else:
+                status_placeholder.error(f"❌ Failed for {video['uid']}: {result.get('error', 'Unknown error')}")
+
+        except Exception as e:
+            status_placeholder.error(f"❌ Error processing {video['uid']}: {str(e)}")
+
+        # Update progress
+        progress_bar.progress((idx + 1) / len(target_videos))
+        time.sleep(0.5)  # Small delay to avoid rate limiting
+
+    # Store in session state for review
+    st.session_state[f"llm_generated_questions_{project_id}"] = generated_questions
+
+    progress_bar.empty()
+    status_placeholder.empty()
+
+    if generated_questions:
+        st.success(f"✅ Successfully generated {len(generated_questions)} questions from {len(target_videos)} videos!")
+        st.info("👉 Click 'View Generated Questions' to review the results")
+    else:
+        st.warning("No questions were generated. Please check your API key and try again.")
+
+
+def display_generated_questions(project_id: int, user_id: int):
+    """Display generated questions in a review interface"""
+
+    generated_questions = st.session_state.get(f"llm_generated_questions_{project_id}", [])
+
+    if not generated_questions:
+        st.info("No generated questions to display. Generate some first!")
+        return
+
+    st.markdown("### 📋 Generated Questions Review")
+
+    # Group questions by video
+    questions_by_video = {}
+    for q in generated_questions:
+        video_uid = q.get("video_uid", "Unknown")
+        if video_uid not in questions_by_video:
+            questions_by_video[video_uid] = []
+        questions_by_video[video_uid].append(q)
+
+    # Display questions grouped by video
+    for video_uid, questions in questions_by_video.items():
+        with st.expander(f"📹 **{video_uid}** - {len(questions)} questions", expanded=True):
+            for i, question in enumerate(questions):
+                st.markdown(f"**Question {i + 1}:** {question.get('question_text', 'N/A')}")
+                st.markdown(f"*Type:* {question.get('question_type', 'N/A')}")
+
+                if question.get('question_type') == 'single' and 'options' in question:
+                    st.markdown(f"*Options:* {', '.join(question.get('options', []))}")
+
+                st.markdown(f"*Suggested Answer:* {question.get('correct_answer', 'N/A')}")
+
+                if 'explanation' in question:
+                    st.markdown(f"*Explanation:* {question.get('explanation', '')}")
+
+                st.markdown("---")
+
+    # Option to save questions to the project
+    if st.button("💾 Save Questions to Project", key=f"save_questions_{project_id}", type="primary"):
+        save_generated_questions_to_project(project_id, user_id, generated_questions)
+
+
+def save_generated_questions_to_project(project_id: int, user_id: int, generated_questions: List[Dict]):
+    """Save generated questions to the database as a new question group"""
+    from label_pizza.models import Question, QuestionGroup, QuestionGroupQuestion
+    from label_pizza.services import QuestionService, QuestionGroupService
+
+    if not generated_questions:
+        st.warning("No questions to save")
+        return
+
+    try:
+        with get_db_session() as session:
+            # Create a new question group for LLM-generated questions
+            group_name = f"LLM Generated - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+            # Create question group using the service
+            question_group = QuestionGroup(
+                title=group_name,
+                display_title=group_name,
+                is_reusable=False,
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            )
+            session.add(question_group)
+            session.flush()
+
+            # Create questions and link to group
+            for order, q_data in enumerate(generated_questions):
+                # Create the question
+                question = Question(
+                    text=q_data.get('question_text', ''),
+                    type=q_data.get('question_type', 'single'),
+                    options=q_data.get('options', []) if q_data.get('question_type') == 'single' else None,
+                    display_values=q_data.get('options', []) if q_data.get('question_type') == 'single' else None,
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                )
+                session.add(question)
+                session.flush()
+
+                # Link question to group
+                qgq = QuestionGroupQuestion(
+                    question_group_id=question_group.id,
+                    question_id=question.id,
+                    order=order
+                )
+                session.add(qgq)
+
+            session.commit()
+
+            st.success(f"✅ Saved {len(generated_questions)} questions as question group: '{group_name}'")
+            st.info("You can now add this question group to a schema or project!")
+
+            # Clear the generated questions from session
+            if f"llm_generated_questions_{project_id}" in st.session_state:
+                del st.session_state[f"llm_generated_questions_{project_id}"]
+
+    except Exception as e:
+        st.error(f"Failed to save questions: {str(e)}")
+        session.rollback()
+
+
+def answer_existing_questions_with_llm(
+    project_id: int,
+    user_id: int,
+    api_key: str,
+    model_name: str,
+    video: Dict,
+    questions: List[Dict],
+    custom_prompt: str,
+    role: str
+):
+    """Use LLM to answer existing questions and pre-fill them in the form (without auto-saving)"""
+    from label_pizza.gemini_service import GeminiService
+
+    if not api_key:
+        st.error("Please enter your Gemini API key")
+        return
+
+    if not questions:
+        st.warning("Please select at least one question to answer")
+        return
+
+    # Initialize Gemini service
+    try:
+        gemini = GeminiService(api_key, model_name=model_name)
+    except Exception as e:
+        st.error(f"Failed to initialize Gemini service: {str(e)}")
+        return
+
+    # Show progress
+    progress_bar = st.progress(0)
+    status_placeholder = st.empty()
+
+    status_placeholder.write(f"Analyzing video: {video['uid']}")
+
+    try:
+        # Call Gemini to answer questions
+        result = gemini.answer_existing_questions(
+            video_url=video['url'],
+            questions=questions,
+            custom_prompt=custom_prompt,
+            timeout=120
+        )
+
+        progress_bar.progress(0.5)
+
+        if result["status"] == "success":
+            answers = result["answers"]
+
+            if not answers:
+                st.warning("No answers were generated. The AI might not have understood the questions.")
+                progress_bar.empty()
+                status_placeholder.empty()
+                return
+
+            # Store answers in session state for form pre-fill (NOT saving to database)
+            status_placeholder.write("Filling in answers...")
+
+            filled_count = 0
+            for question in questions:
+                question_text = question.get('text', question.get('question_text', ''))
+                answer_value = answers.get(question_text)
+
+                if answer_value:
+                    # Store in session state for the form to pick up
+                    # The key format matches what the annotation form uses
+                    session_key = f"ai_prefill_{video['id']}_{question['id']}"
+                    st.session_state[session_key] = answer_value
+                    filled_count += 1
+
+            progress_bar.progress(1.0)
+            status_placeholder.empty()
+            progress_bar.empty()
+
+            st.success(f"✅ Generated {filled_count} answers!")
+            st.info("📋 Answers pre-filled in form. Review and submit manually.")
+
+            # Set session state to scroll to this video
+            st.session_state[f"scroll_to_video_{project_id}"] = video['id']
+            st.session_state[f"llm_just_generated_{project_id}"] = True
+
+            # Rerun to show the filled answers in the form
+            time.sleep(0.5)
+            st.rerun()
+
+        else:
+            st.error(f"❌ Failed to generate answers: {result.get('error', 'Unknown error')}")
+            progress_bar.empty()
+            status_placeholder.empty()
+
+    except Exception as e:
+        st.error(f"❌ Error: {str(e)}")
+        progress_bar.empty()
+        status_placeholder.empty()
+
+
+def display_instruction_tab_content(instructions_url: Optional[str], cheat_sheet_markdown: Optional[str] = None):
+    """Display instruction tab content with external URL button and cheat sheet"""
+    # Check if cheat_sheet_markdown is a file path and load the content
+    if cheat_sheet_markdown and cheat_sheet_markdown.strip():
+        import os
+        # Check if it's a file path (ends with .md or .markdown, or if the file exists)
+        if cheat_sheet_markdown.endswith(('.md', '.markdown')) or os.path.isfile(cheat_sheet_markdown):
+            try:
+                # Try to read as absolute path first
+                if os.path.isfile(cheat_sheet_markdown):
+                    with open(cheat_sheet_markdown, 'r', encoding='utf-8') as f:
+                        cheat_sheet_markdown = f.read()
+                # Try relative to workspace directory
+                elif os.path.isfile(os.path.join('workspace', cheat_sheet_markdown)):
+                    with open(os.path.join('workspace', cheat_sheet_markdown), 'r', encoding='utf-8') as f:
+                        cheat_sheet_markdown = f.read()
+            except Exception as e:
+                st.warning(f"Could not load cheat sheet from file: {e}")
+                cheat_sheet_markdown = None
+
     st.markdown("#### 📖 Project Instructions")
     
     st.markdown(f"""

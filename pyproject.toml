@@ -29,7 +29,8 @@ dependencies = [
     "tqdm",
     "gspread",
     "oauth2client",
-    "google-api-python-client"
+    "google-api-python-client",
+    "google-genai>=1.0.0"
 ]
 
 # This section tells setuptools to find packages automatically
