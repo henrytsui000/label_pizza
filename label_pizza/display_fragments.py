@@ -38,6 +38,19 @@ from label_pizza.accuracy_analytics import display_user_accuracy_simple, display
 # Video Display Functions
 ###############################################################################
 
+def filter_disabled_options(original_options: list, display_values: list) -> tuple:
+    """Remove options containing 'This is not an option' from choices."""
+    filtered_original = []
+    filtered_display = []
+    
+    for orig, disp in zip(original_options, display_values):
+        if "This is not an option" not in str(disp):
+            filtered_original.append(orig)
+            filtered_display.append(disp)
+    
+    return filtered_original, filtered_display
+
+
 @st.fragment
 def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: str, mode: str):
     """Display a single video-answer pair - FULLY OPTIMIZED WITH SINGLE BATCH OPERATION"""
@@ -694,6 +707,8 @@ def display_single_choice_question(
 
     original_options = question["options"]
     display_values = question.get("display_values", original_options)
+    
+    original_options, display_values = filter_disabled_options(original_options, display_values)
     
     display_to_value = dict(zip(display_values, original_options))
     value_to_display = dict(zip(original_options, display_values))
