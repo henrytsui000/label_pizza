@@ -16,6 +16,11 @@ from dotenv import load_dotenv
 import importlib.util
 import sys
 from pathlib import Path
+import re
+
+def natural_sort_key(s: str):
+    """Key function for natural sorting (abc 2 before abc 13)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
 
 load_dotenv()
 
@@ -3471,6 +3476,36 @@ class CustomDisplayService:
             })
         
         return result
+
+    @staticmethod
+    def get_custom_display_map_for_project(
+        project_id: int,
+        session: Session
+    ) -> Dict[Tuple[int, int], Dict[str, Any]]:
+        """Get all custom displays for a project as a lookup map.
+
+        This is a lightweight batch fetch method optimized for sync operations.
+        Returns a dictionary keyed by (video_id, question_id) for O(1) lookups.
+
+        Args:
+            project_id: Project ID
+            session: Database session
+
+        Returns:
+            Dictionary mapping (video_id, question_id) -> {display_text, display_values}
+        """
+        overrides = session.scalars(
+            select(ProjectVideoQuestionDisplay)
+            .where(ProjectVideoQuestionDisplay.project_id == project_id)
+        ).all()
+
+        return {
+            (override.video_id, override.question_id): {
+                "display_text": override.custom_display_text,
+                "display_values": override.custom_option_display_map
+            }
+            for override in overrides
+        }
 
 
 class AuthService:
@@ -8927,8 +8962,9 @@ class ProjectGroupService:
             else:
                 grouped_projects["Unassigned"].append(project_dict)
         
-        # Remove empty groups
-        return {name: projects for name, projects in grouped_projects.items() if projects}
+        # Remove empty groups and sort projects by name within each group
+        return {name: sorted(projects, key=lambda p: natural_sort_key(p["name"]))
+                for name, projects in grouped_projects.items() if projects}
 
     @staticmethod
     def get_project_group_counts(session: Session) -> Dict[str, int]:
