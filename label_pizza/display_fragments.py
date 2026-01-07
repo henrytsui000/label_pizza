@@ -80,9 +80,9 @@ def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: 
             for group in question_groups
         ]
         
-        # Progress display format
+        # Progress display format with anchor for scrolling
         st.markdown(f"""
-        <div style="{get_card_style('#B180FF')}text-align: center;">
+        <div id="video_{video['id']}" style="{get_card_style('#B180FF')}text-align: center;">
             <div style="color: #5C00BF; font-weight: 500; font-size: 0.95rem;">
                 {video['uid']} - {' | '.join(completion_details)} - Progress: {completed_count}/{total_count} Complete
             </div>
@@ -127,8 +127,7 @@ def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: 
         st.error(f"Error loading project data: {str(e)}")
         if st.button("🔄 Refresh Page", key=f"refresh_{video['id']}_{project_id}"):
             st.rerun()
-
-def display_question_group_in_fixed_container(video: Dict, project_id: int, user_id: int, group_id: int, role: str, mode: str, container_height: int=None, bulk_cache_data: Dict = None):
+def display_question_group_in_fixed_container(video: Dict, project_id: int, user_id: int, group_id: int, role: str, mode: str, container_height: int=None, bulk_cache_data: Dict = None, group_index: int = 0):
     """Display question group content with preloaded answers support - FIXED CUSTOM DISPLAY HANDLING"""
 
     try:
@@ -3513,9 +3512,11 @@ def display_project_view(user_id: int, role: str):
             with get_db_session() as session:
                 schema_details = SchemaService.get_schema_details(schema_id=project["schema_id"], session=session)
             instructions_url = schema_details.get("instructions_url")
+            cheat_sheet_markdown = schema_details.get("cheat_sheet_markdown")
         except Exception as e:
             print(f"Error getting schema details: {e}")
             instructions_url = None
+            cheat_sheet_markdown = None
     except ValueError as e:
         st.error(f"Error loading project: {str(e)}")
         return
@@ -3628,7 +3629,7 @@ def display_project_view(user_id: int, role: str):
             display_auto_submit_tab(project_id=project_id, user_id=user_id, role=role, videos=videos)
         
         with instruction_tab:
-            display_instruction_tab_content(instructions_url=instructions_url)
+            display_instruction_tab_content(instructions_url=instructions_url, cheat_sheet_markdown=cheat_sheet_markdown)
     
     elif role == "meta_reviewer":
         if mode == "Training":
