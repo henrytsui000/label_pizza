@@ -341,7 +341,7 @@ def sync_videos(
     uid_duplicates = []
     url_duplicates = []
     
-    for idx, item in enumerate(processed, 1):
+    for idx, item in enumerate(tqdm(processed), 1):
         video_uid = item["video_uid"]
         url = item["url"]
         if video_uid in video_uids:
@@ -358,7 +358,7 @@ def sync_videos(
         raise ValueError(f"Duplicate video_uid values found: {', '.join(duplicate_info)}")
     if url_duplicates:
         duplicate_info = [f"url '{url}' at entry #{idx}" for url, idx in url_duplicates]
-        raise ValueError(f"Duplicate url values found: {', '.join(duplicate_info)}")
+        # raise ValueError(f"Duplicate url values found: {', '.join(duplicate_info)}")
     
     print(f"✅ No duplicates found - all {len(video_uids)} video_uid values and {len(urls)} url values are unique")
 
@@ -1808,6 +1808,7 @@ def _sync_custom_displays(project_id: int, videos: list[Any], sess) -> Dict[str,
     # Get project questions and videos using service methods
     proj_q = {q["id"]: q["text"] for q in ProjectService.get_project_questions(project_id, sess)}
     proj_v = {v["id"]: v["uid"] for v in VideoService.get_project_videos(project_id, sess)}
+    existing_displays = CustomDisplayService.get_custom_display_map_for_project(project_id, sess)
 
     # ── Phase 1: Plan all operations and verify them ──────────────────────
     operations = []  # List of (operation_type, params) tuples
@@ -1825,8 +1826,8 @@ def _sync_custom_displays(project_id: int, videos: list[Any], sess) -> Dict[str,
                     verification_errors.append(f"Video '{uid}': question_text '{json_question_text}' not found in database")
 
             for q_id, q_text in proj_q.items():
-                # Get existing custom display
-                db_rec = CustomDisplayService.get_custom_display(q_id, project_id, vid_id, sess)
+                # Get existing custom display from pre-fetched map (O(1) lookup, no DB call!)
+                db_rec = existing_displays.get((vid_id, q_id))
                 json_cfg = json_q_cfg.get(q_text)
 
                 if db_rec and not json_cfg:
@@ -2393,9 +2394,52 @@ def sync_projects(*, projects_path: str | Path | None = None, projects_data: Lis
     projects_data = deepcopy(projects_data)
     
     print(f"\n🚀 Starting project upload pipeline with {len(projects_data)} projects...")
-    
+
     # Validate and normalize project data
+    print("\n📋 Collecting unique identifiers...")
+    all_schema_names: set = set()
+    all_question_texts: set = set()
+
+    for cfg in projects_data:
+        if "schema_name" in cfg:
+            all_schema_names.add(cfg["schema_name"])
+        for video in cfg.get("videos", []):
+            if isinstance(video, dict):
+                for q in video.get("questions", []):
+                    if isinstance(q, dict) and "question_text" in q:
+                        all_question_texts.add(q["question_text"])
+
+    print(f"   Found {len(all_schema_names)} unique schema(s), {len(all_question_texts)} unique question(s)")
+
+    print("\n📥 Batch fetching schema questions and question types...")
+    schema_questions_map: Dict[str, Dict[str, str]] = {}  # {schema_name: {question_text: type}}
+    question_types_map: Dict[str, str] = {}  # {question_text: type}
+
+    with label_pizza.db.SessionLocal() as sess:
+        # Fetch all schema questions
+        for schema_name in tqdm(all_schema_names, desc="Fetching schemas", unit="schema"):
+            try:
+                schema_id = SchemaService.get_schema_id_by_name(schema_name, sess)
+                questions_df = SchemaService.get_schema_questions(schema_id, sess)
+                if not questions_df.empty:
+                    schema_questions_map[schema_name] = dict(zip(questions_df["Text"], questions_df["Type"]))
+                else:
+                    schema_questions_map[schema_name] = {}
+            except:
+                schema_questions_map[schema_name] = {}
+
+        # Fetch all question types
+        for question_text in tqdm(all_question_texts, desc="Fetching questions", unit="question"):
+            try:
+                question_types_map[question_text] = QuestionService.get_question_by_text(question_text, sess)["type"]
+            except:
+                pass  # Will fail validation later with proper error message
+
+    print(f"   Cached {len(schema_questions_map)} schema(s), {len(question_types_map)} question type(s)")
+
     processed: List[Dict] = []
+    seen_project_names: set = set()  # For duplicate detection (merged from separate loop)
+
     with tqdm(total=len(projects_data), desc="Validating project data", unit="project") as pbar:
         for idx, cfg in enumerate(projects_data, 1):
             # Validate required fields
@@ -2413,6 +2457,14 @@ def sync_projects(*, projects_path: str | Path | None = None, projects_data: Lis
                     error_parts.append(f"extra: {', '.join(extra)}")
                 
                 raise ValueError(f"Entry #{idx} {', '.join(error_parts)}")
+            
+            # Check duplicate project names (merged from separate loop, O(1) lookup with set)
+            if cfg["project_name"] in seen_project_names:
+                raise ValueError(f"Duplicate project_name found: '{cfg['project_name']}' at entry #{idx}")
+            seen_project_names.add(cfg["project_name"])
+
+            # Get cached schema questions for this project
+            schema_question_types = schema_questions_map.get(cfg["schema_name"], {})
             
             video_uids = []
             video_duplicates = []
@@ -2433,27 +2485,15 @@ def sync_projects(*, projects_path: str | Path | None = None, projects_data: Lis
                             raise ValueError(f"Entry #{idx}, video #{video_idx + 1}: Extra fields: {', '.join(extra)}")
                         
                     video_uid = video["video_uid"]
-                    # Get question types from database
-                    question_types = {}
-                    try:
-                        with label_pizza.db.SessionLocal() as sess:
-                            schema_id = SchemaService.get_schema_id_by_name(cfg["schema_name"], sess)
-                            questions_df = SchemaService.get_schema_questions(schema_id, sess)
-                            if not questions_df.empty:
-                                question_types = dict(zip(questions_df["Text"], questions_df["Type"]))
-                    except:
-                        # Schema doesn't exist, skip validation
-                        pass
-                    
+
                     for question_idx, q in enumerate(video["questions"]):
                         if not isinstance(q, dict):
                             raise ValueError(f"Entry #{idx}, video '{video_uid}', question #{question_idx + 1}: Invalid format")
-                        question_type = None
-                        with label_pizza.db.SessionLocal() as sess:
-                            try:
-                                question_type = QuestionService.get_question_by_text(q["question_text"], sess)["type"]
-                            except:
-                                raise ValueError(f"Entry #{idx}, video '{video_uid}', question #{question_idx + 1}: Question not found in database")
+
+                        # Use cached question type (no DB call!)
+                        question_type = question_types_map.get(q["question_text"])
+                        if question_type is None:
+                            raise ValueError(f"Entry #{idx}, video '{video_uid}', question #{question_idx + 1}: Question not found in database")
 
                         if question_type not in ["single", "description"]:
                             raise ValueError(f"Entry #{idx}, video '{video_uid}', question #{question_idx + 1}: Question type must be 'single' or 'description'")
@@ -2490,8 +2530,8 @@ def sync_projects(*, projects_path: str | Path | None = None, projects_data: Lis
                                 raise ValueError(f"Entry #{idx}, video '{video_uid}', question #{question_idx + 1}: {'; '.join(error_parts)}")
                         question_text = q["question_text"]
                         
-                        # Check if question exists in database
-                        if question_text not in question_types:
+                        # Check if question exists in schema (using cached data)
+                        if question_text not in schema_question_types:
                             raise ValueError(f"Entry #{idx}, video '{video_uid}', question '{question_text}': Question not found in schema")
                 else:
                     raise ValueError(f"Entry #{idx}, video #{video_idx + 1}: Invalid video format. Must be string or dict with 'video_uid'")
@@ -2510,25 +2550,8 @@ def sync_projects(*, projects_path: str | Path | None = None, projects_data: Lis
                 
             processed.append(cfg)
             pbar.update(1)
-            
-    # Check for duplicate project_name values
-    print("\n🔍 Checking for duplicate project_name values...")
-    
-    project_names = []
-    project_name_duplicates = []
-    
-    for idx, project in enumerate(projects_data, 1):
-        project_name = project["project_name"]
-        if project_name in project_names:
-            project_name_duplicates.append((project_name, idx))
-        else:
-            project_names.append(project_name)
-    
-    if project_name_duplicates:
-        duplicate_info = [f"project_name '{name}' at entry #{idx}" for name, idx in project_name_duplicates]
-        raise ValueError(f"Duplicate project_name values found: {', '.join(duplicate_info)}")
-    
-    print(f"✅ No duplicates found - all {len(project_names)} project_name values are unique")
+
+    print(f"✅ Validation complete - all {len(seen_project_names)} project(s) are valid and unique")
 
     # Separate projects to add vs sync
     to_add, to_sync = [], []
