@@ -1033,7 +1033,13 @@ def show_schema_create_form():
     instructions_url = st.text_input("Instructions URL (optional)", key="admin_schema_instructions", 
                                    placeholder="https://example.com/instructions", 
                                    help="URL linking to instructions for this schema")
-    
+
+    # Cheat Sheet
+    cheat_sheet_markdown = st.text_area("Cheat Sheet (Markdown, optional)", key="admin_schema_cheat_sheet",
+                                   placeholder="Enter markdown content for a quick reference cheat sheet.\nSupports regular markdown and Mermaid diagrams using ```mermaid code blocks.",
+                                   help="Markdown content for annotator cheat sheet. Supports Mermaid diagrams.",
+                                   height=200)
+
     # Custom display checkbox
     has_custom_display = st.checkbox("Has Custom Display", key="admin_schema_custom_display", 
                                    help="Enable if this schema has custom display logic for questions or options")
@@ -1162,12 +1168,18 @@ def show_schema_create_form():
                 clean_instructions_url = instructions_url.strip() if instructions_url else None
                 if clean_instructions_url == "":
                     clean_instructions_url = None
-                
+
+                # Clean up cheat sheet markdown
+                clean_cheat_sheet_markdown = cheat_sheet_markdown.strip() if cheat_sheet_markdown else None
+                if clean_cheat_sheet_markdown == "":
+                    clean_cheat_sheet_markdown = None
+
                 with get_db_session() as session:
                     SchemaService.create_schema(
                         name=schema_name, 
                         question_group_ids=selected_groups, 
                         instructions_url=clean_instructions_url,
+                        cheat_sheet_markdown=clean_cheat_sheet_markdown,
                         has_custom_display=has_custom_display,
                         session=session
                     )
@@ -1259,7 +1271,16 @@ def show_schema_edit_form(schema_id: int):
             placeholder="https://example.com/instructions",
             help="Leave empty to remove instructions URL"
         )
-        
+
+        new_cheat_sheet_markdown = st.text_area(
+            "Cheat Sheet (Markdown)",
+            value=schema_details.get("cheat_sheet_markdown") or "",
+            key="admin_edit_schema_cheat_sheet",
+            placeholder="Enter markdown content for a quick reference cheat sheet.\nSupports regular markdown and Mermaid diagrams using ```mermaid code blocks.",
+            help="Markdown content for annotator cheat sheet. Supports Mermaid diagrams. Leave empty to remove cheat sheet.",
+            height=200
+        )
+
         edit_col1, edit_col2 = st.columns(2)
         with edit_col1:
             new_has_custom_display = st.checkbox(
@@ -1378,6 +1399,10 @@ def show_schema_edit_form(schema_id: int):
                     current_instructions = schema_details["instructions_url"] or ""
                     if clean_instructions_url != current_instructions:
                         changes_made.append("Instructions URL")
+                    clean_cheat_sheet_markdown = new_cheat_sheet_markdown.strip() if new_cheat_sheet_markdown else ""
+                    current_cheat_sheet = schema_details.get("cheat_sheet_markdown") or ""
+                    if clean_cheat_sheet_markdown != current_cheat_sheet:
+                        changes_made.append("Cheat Sheet")
                     
                     if new_has_custom_display != schema_details["has_custom_display"]:
                         changes_made.append("Custom display setting")
@@ -1392,12 +1417,16 @@ def show_schema_edit_form(schema_id: int):
                         # Prepare instructions URL (empty string means clear it)
                         if clean_instructions_url == "":
                             clean_instructions_url = ""  # This will be handled by edit_schema to set to None
+                        # Prepare cheat sheet markdown (empty string means clear it)
+                        if clean_cheat_sheet_markdown == "":
+                            clean_cheat_sheet_markdown = ""  # This will be handled by edit_schema to set to None
                         
                         with get_db_session() as session:
                             SchemaService.edit_schema(
                                 schema_id=schema_id,
                                 name=new_name if new_name != schema_details["name"] else None,
                                 instructions_url=clean_instructions_url if clean_instructions_url != current_instructions else None,
+                                cheat_sheet_markdown=clean_cheat_sheet_markdown if clean_cheat_sheet_markdown != current_cheat_sheet else None,
                                 has_custom_display=new_has_custom_display if new_has_custom_display != schema_details["has_custom_display"] else None,
                                 is_archived=new_is_archived if new_is_archived != schema_details["is_archived"] else None,
                                 session=session
@@ -1438,7 +1467,14 @@ def show_schema_edit_form(schema_id: int):
                     old_display = current_instructions or "None"
                     new_display = clean_instructions_url or "None"
                     st.markdown(f"**Instructions URL:** {old_display} → {new_display}")
-                
+
+                clean_cheat_sheet_markdown = new_cheat_sheet_markdown.strip() if new_cheat_sheet_markdown else ""
+                current_cheat_sheet = schema_details.get("cheat_sheet_markdown") or ""
+                if clean_cheat_sheet_markdown != current_cheat_sheet:
+                    old_display = "Set" if current_cheat_sheet else "None"
+                    new_display = "Set" if clean_cheat_sheet_markdown else "None"
+                    st.markdown(f"**Cheat Sheet:** {old_display} → {new_display}")
+
                 if new_has_custom_display != schema_details["has_custom_display"]:
                     st.markdown(f"**Custom Display:** {schema_details['has_custom_display']} → {new_has_custom_display}")
                 
@@ -1453,6 +1489,7 @@ def show_schema_edit_form(schema_id: int):
                 no_changes = (
                     new_name == schema_details["name"] and
                     clean_instructions_url == current_instructions and
+                    clean_cheat_sheet_markdown == current_cheat_sheet and
                     new_has_custom_display == schema_details["has_custom_display"] and
                     new_is_archived == schema_details["is_archived"] and
                     new_group_order == current_order

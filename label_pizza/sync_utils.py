@@ -1404,6 +1404,7 @@ def add_schemas(schemas: List[Dict]) -> List[Dict]:
                 name=s["schema_name"],
                 question_group_ids=group_ids,
                 instructions_url=s.get("instructions_url"),
+                cheat_sheet_markdown=s.get("cheat_sheet_markdown"),
                 has_custom_display=s.get("has_custom_display", False),
                 session=sess,
             )
@@ -1415,6 +1416,7 @@ def add_schemas(schemas: List[Dict]) -> List[Dict]:
                 name=s["schema_name"],
                 question_group_ids=group_ids,
                 instructions_url=s.get("instructions_url"),
+                cheat_sheet_markdown=s.get("cheat_sheet_markdown"),
                 has_custom_display=s.get("has_custom_display", False),
                 session=sess,
             )
@@ -1522,7 +1524,13 @@ def update_schemas(schemas: List[Dict]) -> List[Dict]:
             if new_instructions_url != sch.instructions_url:
                 needs_update = True
                 changes.append("instructions_url")
-            
+
+            # Check cheat_sheet_markdown
+            new_cheat_sheet_markdown = s.get("cheat_sheet_markdown")
+            if new_cheat_sheet_markdown != sch.cheat_sheet_markdown:
+                needs_update = True
+                changes.append("cheat_sheet_markdown")
+
             # Check has_custom_display
             new_has_custom_display = s.get("has_custom_display", False)
             if new_has_custom_display != sch.has_custom_display:
@@ -1551,6 +1559,7 @@ def update_schemas(schemas: List[Dict]) -> List[Dict]:
                 schema_id=sch.id,
                 name=s.get("schema_name"),
                 instructions_url=s.get("instructions_url"),
+                cheat_sheet_markdown=s.get("cheat_sheet_markdown"),
                 has_custom_display=s.get("has_custom_display"),
                 is_archived=s.get("is_archived"),
                 session=sess,
@@ -1562,6 +1571,7 @@ def update_schemas(schemas: List[Dict]) -> List[Dict]:
                 schema_id=sch.id,
                 name=s.get("schema_name"),
                 instructions_url=s.get("instructions_url"),
+                cheat_sheet_markdown=s.get("cheat_sheet_markdown"),
                 has_custom_display=s.get("has_custom_display"),
                 is_archived=s.get("is_archived"),
                 session=sess,
@@ -1641,6 +1651,8 @@ def sync_schemas(*, schemas_path: str | Path | None = None, schemas_data: List[D
     processed: List[Dict] = []
     for idx, s in enumerate(schemas_data, 1):
         required = {"schema_name", "question_group_names", "instructions_url", "has_custom_display", "is_active"}
+        optional = {"cheat_sheet_markdown"}
+        allowed = required | optional
         schema_keys = set(s.keys())
 
         if schema_keys != required:

@@ -3684,13 +3684,13 @@ def display_project_view(user_id: int, role: str):
             display_layout_tab_content(videos=videos, role=role)
         
         with instruction_tab:
-            display_instruction_tab_content(instructions_url=instructions_url)
+            display_instruction_tab_content(instructions_url=instructions_url, cheat_sheet_markdown=cheat_sheet_markdown)
     
     else:  # Annotator role
         instruction_tab, layout_tab, sort_tab, auto_submit_tab = st.tabs(["📖 Instructions", "🎛️ Layout Settings", "🔄 Sort", "⚡ Auto-Submit"])
         
         with instruction_tab:
-            display_instruction_tab_content(instructions_url=instructions_url)
+            display_instruction_tab_content(instructions_url=instructions_url, cheat_sheet_markdown=cheat_sheet_markdown)
         
         with layout_tab:
             display_layout_tab_content(videos=videos, role=role)
@@ -3804,15 +3804,22 @@ def display_instruction_tab_content(instructions_url: Optional[str]):
                  disabled=True, 
                  use_container_width=True,
                  help="No instructions URL configured for this project")
-        
-        st.markdown(f"""
-        <div style="margin-top: 16px; padding: 12px; background: #fff3cd; border-radius: 8px; border-left: 4px solid #ffc107;">
-            <p style="margin: 0; color: #856404; font-size: 0.9rem;">
-                ⚠️ <strong>No instructions available</strong><br>
-                Contact your project administrator to add instructions for this project.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+
+        # Only show "No instructions available" if there's no cheat sheet either
+        if not (cheat_sheet_markdown and cheat_sheet_markdown.strip()):
+            st.markdown(f"""
+            <div style="margin-top: 16px; padding: 12px; background: #fff3cd; border-radius: 8px; border-left: 4px solid #ffc107;">
+                <p style="margin: 0; color: #856404; font-size: 0.9rem;">
+                    ⚠️ <strong>No instructions available</strong><br>
+                    Contact your project administrator to add instructions for this project.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+    # Display cheat sheet if available
+    if cheat_sheet_markdown and cheat_sheet_markdown.strip():
+        st.markdown("---")
+        with st.expander("📋 **Quick Reference Cheat Sheet**", expanded=True):
+            st.markdown(cheat_sheet_markdown, unsafe_allow_html=True)
     
 ###############################################################################
 # PROJECT DASHBOARD FUNCTIONS
