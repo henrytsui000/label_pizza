@@ -3915,21 +3915,179 @@ def display_llm_sidebar(project_id: int, user_id: int, role: str, videos: List[D
 
 
 @st.fragment
-def display_llm_generation_content(project_id: int, user_id: int, role: str, videos: List[Dict]):
-    """Display LLM-based annotation generation interface"""
-    from label_pizza.gemini_service import GeminiService, test_gemini_connection
-    from label_pizza.models import Question
+def display_chat_fragment(project_id: int, user_id: int, api_key: str, selected_model: str):
+    """Chat fragment with low-latency updates - only reruns this fragment on chat"""
+    import streamlit.components.v1 as components
 
-    st.markdown("#### 🔑 API Config")
+    # Add CSS for chat bubbles
+    st.markdown("""
+    <style>
+    .chat-message {
+        padding: 10px 14px;
+        border-radius: 12px;
+        margin: 8px 0;
+        font-size: 0.9rem;
+        line-height: 1.5;
+    }
+    .user-message {
+        background: #e3f2fd;
+        margin-left: 20px;
+        border-bottom-right-radius: 4px;
+    }
+    .ai-message {
+        background: #f5f5f5;
+        margin-right: 20px;
+        border-bottom-left-radius: 4px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    api_key = st.text_input(
-        "API Key",
-        type="password",
-        key=f"llm_api_key_{project_id}_{user_id}",
-        help="Get at: https://aistudio.google.com/app/apikey",
-        placeholder="Paste API key..."
+    # Inject JavaScript for Ctrl+Enter to send (runs in parent frame)
+    components.html("""
+    <script>
+    const parentDoc = window.parent.document;
+    if (!parentDoc._chatCtrlEnterListenerAdded) {
+        parentDoc._chatCtrlEnterListenerAdded = true;
+        parentDoc.addEventListener('keydown', function(e) {
+            if (e.ctrlKey && e.key === 'Enter') {
+                const sidebar = parentDoc.querySelector('[data-testid="stSidebar"]');
+                if (sidebar) {
+                    const sendBtn = sidebar.querySelector('button[kind="primary"]');
+                    if (sendBtn && !sendBtn.disabled) {
+                        sendBtn.click();
+                    }
+                }
+            }
+        });
+    }
+    </script>
+    """, height=0)
+
+    st.markdown("#### 💬 Chat with AI")
+
+    # Initialize chat history and input counter in session state
+    chat_history_key = f"llm_chat_history_{project_id}_{user_id}"
+    input_counter_key = f"llm_chat_input_counter_{project_id}_{user_id}"
+
+    if chat_history_key not in st.session_state:
+        st.session_state[chat_history_key] = []
+    if input_counter_key not in st.session_state:
+        st.session_state[input_counter_key] = 0
+
+    # Display chat history
+    chat_container = st.container(height=300)
+    with chat_container:
+        if not st.session_state[chat_history_key]:
+            st.caption("Start a conversation with the AI...")
+        else:
+            for msg in st.session_state[chat_history_key]:
+                if msg["role"] == "user":
+                    st.markdown(
+                        f'<div class="chat-message user-message">{msg["content"]}</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        f'<div class="chat-message ai-message">{msg["content"]}</div>',
+                        unsafe_allow_html=True
+                    )
+
+    # Use counter-based key to create "new" widget for clearing input
+    chat_input_key = f"llm_chat_input_{project_id}_{user_id}_{st.session_state[input_counter_key]}"
+
+    user_message = st.text_area(
+        "Message",
+        key=chat_input_key,
+        height=80,
+        placeholder="Type your message... (Ctrl+Enter to send)",
+        label_visibility="collapsed"
     )
 
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        send_btn = st.button(
+            "📤 Send",
+            key=f"llm_chat_send_{project_id}_{user_id}",
+            type="primary",
+            use_container_width=True,
+            disabled=not api_key or not user_message
+        )
+    with col2:
+        if st.button("🗑️", key=f"llm_chat_clear_{project_id}_{user_id}", help="Clear chat"):
+            st.session_state[chat_history_key] = []
+            st.session_state[input_counter_key] += 1
+            st.rerun(scope="fragment")
+
+    if send_btn and user_message and api_key:
+        try:
+            # Add user message to history
+            st.session_state[chat_history_key].append({
+                "role": "user",
+                "content": user_message
+            })
+
+            # Get AI response
+            with st.spinner("Thinking..."):
+                from google import genai
+                client = genai.Client(api_key=api_key)
+
+                # Build conversation context
+                conversation = "\n".join([
+                    f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+                    for m in st.session_state[chat_history_key]
+                ])
+
+                response = client.models.generate_content(
+                    model=selected_model,
+                    contents=conversation
+                )
+
+                ai_response = response.text
+
+                # Add AI response to history
+                st.session_state[chat_history_key].append({
+                    "role": "assistant",
+                    "content": ai_response
+                })
+
+            # Increment counter to clear input on next render
+            st.session_state[input_counter_key] += 1
+            # Rerun only this fragment for low latency
+            st.rerun(scope="fragment")
+
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+    # Help section
+    with st.expander("📚 Help"):
+        st.markdown("""
+        **Chat Mode:**
+        - Ask questions about annotation guidelines
+        - Get help understanding video content
+        - Discuss labeling strategies
+
+        **Auto-fill Mode:**
+        - Select video & questions
+        - AI analyzes video and fills answers
+        - Review before submitting
+        """)
+
+
+@st.fragment
+def display_llm_generation_content(project_id: int, user_id: int, role: str, videos: List[Dict]):
+    """Display LLM-based annotation generation interface with two modes"""
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    # Get API key from environment variable
+    api_key = os.environ.get("LLM_API", "") or os.environ.get("GEMINI_API_KEY", "")
+
+    if not api_key:
+        st.warning("⚠️ Set LLM_API or GEMINI_API_KEY in .env file")
+        return
+
+    # Model selection
     model_options = [
         "gemini-3-flash-preview",
         "gemini-3-pro-preview",
@@ -3938,130 +4096,114 @@ def display_llm_generation_content(project_id: int, user_id: int, role: str, vid
         "gemini-2.5-pro",
     ]
     selected_model = st.selectbox(
-        "Model",
+        "🤖 Model",
         model_options,
         key=f"llm_model_{project_id}_{user_id}",
         help="Select Gemini model",
         label_visibility="collapsed"
     )
 
-    if api_key and st.button("🔍 Test", use_container_width=True):
-        with st.spinner("Testing..."):
-            result = test_gemini_connection(api_key)
-            if result["status"] == "success":
-                st.success("✅ Connected!")
-            else:
-                st.error(f"❌ Failed")
-
     st.markdown("---")
 
-    # Answer existing questions mode
-    st.markdown("#### 📹 Select Video")
+    # Two mode tabs - Chat first for quick access
+    chat_tab, autofill_tab = st.tabs(["💬 Chat", "📝 Auto-fill"])
 
-    # Create video options
-    video_options = {f"{v['uid']}": v for v in videos}
-    selected_video_uid = st.selectbox(
-        "Video",
-        options=list(video_options.keys()),
-        key=f"llm_selected_video_{project_id}_{user_id}",
-        help="Choose video to analyze",
-        label_visibility="collapsed"
-    )
+    # ===== CHAT MODE =====
+    with chat_tab:
+        display_chat_fragment(project_id, user_id, api_key, selected_model)
 
-    selected_video = video_options[selected_video_uid]
+    # ===== AUTO-FILL MODE =====
+    with autofill_tab:
+        st.markdown("#### 📹 Select Video")
 
-    st.markdown("---")
-    st.markdown("#### 📝 Select Questions")
-
-    # Get all questions for this project
-    try:
-        project_questions = get_project_questions_cached(project_id=project_id)
-
-        if not project_questions:
-            st.warning("No questions")
-            return
-
-        # Group questions by question group
-        question_groups_dict = {}
-        for q in project_questions:
-            group_title = q.get('group_title', 'Ungrouped')
-            if group_title not in question_groups_dict:
-                question_groups_dict[group_title] = []
-            question_groups_dict[group_title].append(q)
-
-        # Display questions with multiselect by group
-        selected_questions = []
-
-        for group_title, questions in question_groups_dict.items():
-            with st.expander(f"📂 {group_title} ({len(questions)})", expanded=True):
-                for q in questions:
-                    is_selected = st.checkbox(
-                        f"{q['text'][:50]}..." if len(q['text']) > 50 else q['text'],
-                        key=f"llm_q_select_{project_id}_{q['id']}",
-                        help=f"Full: {q['text']}\nType: {q['type']}"
-                    )
-                    if is_selected:
-                        selected_questions.append(q)
-
-        if not selected_questions:
-            st.info("☝️ Check questions")
-        else:
-            st.success(f"✅ {len(selected_questions)} selected")
-
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
-        return
-
-    st.markdown("---")
-    st.markdown("#### 💬 Context (Optional)")
-
-    generation_prompt = st.text_area(
-        "Prompt",
-        value="""Watch video carefully. For multiple choice, select exact option. For description, be clear and concise.""",
-        height=80,
-        key=f"llm_answer_prompt_{project_id}_{user_id}",
-        help="Add context for AI",
-        label_visibility="collapsed"
-    )
-
-    st.markdown("---")
-
-    # Answer Questions
-    if st.button(
-        "✨ Generate Answers",
-        key=f"llm_answer_btn_{project_id}_{user_id}",
-        type="primary",
-        use_container_width=True,
-        disabled=not api_key or not selected_questions
-    ):
-        # Trigger answer generation
-        answer_existing_questions_with_llm(
-            project_id=project_id,
-            user_id=user_id,
-            api_key=api_key,
-            model_name=selected_model,
-            video=selected_video,
-            questions=selected_questions,
-            custom_prompt=generation_prompt,
-            role=role
+        # Create video options
+        video_options = {f"{v['uid']}": v for v in videos}
+        selected_video_uid = st.selectbox(
+            "Video",
+            options=list(video_options.keys()),
+            key=f"llm_selected_video_{project_id}_{user_id}",
+            help="Choose video to analyze",
+            label_visibility="collapsed"
         )
 
-    st.caption("💡 Auto-fills answers & scrolls to video")
+        selected_video = video_options[selected_video_uid]
 
-    # Display help section
-    with st.expander("📚 Help"):
-        st.markdown("""
-        **Quick Start:**
-        1. Get API key at [Google AI Studio](https://aistudio.google.com/app/apikey)
-        2. Enter key above
-        3. Select video & questions
-        4. Click Generate
+        st.markdown("---")
+        st.markdown("#### 📝 Select Questions")
 
-        **Notes:**
-        - ✅ Free tier: 1500 requests/day
-        - ✅ Auto-fills exact options
-        - ⏱️ Takes ~30-60 sec/video
-        """)
+        # Get all questions for this project
+        try:
+            project_questions = get_project_questions_cached(project_id=project_id)
+
+            if not project_questions:
+                st.warning("No questions")
+            else:
+                # Group questions by question group
+                question_groups_dict = {}
+                for q in project_questions:
+                    group_title = q.get('group_title', 'Ungrouped')
+                    if group_title not in question_groups_dict:
+                        question_groups_dict[group_title] = []
+                    question_groups_dict[group_title].append(q)
+
+                # Display questions with multiselect by group
+                selected_questions = []
+
+                for group_title, questions in question_groups_dict.items():
+                    with st.expander(f"📂 {group_title} ({len(questions)})", expanded=True):
+                        for q in questions:
+                            is_selected = st.checkbox(
+                                f"{q['text'][:50]}..." if len(q['text']) > 50 else q['text'],
+                                key=f"llm_q_select_{project_id}_{q['id']}",
+                                help=f"Full: {q['text']}\nType: {q['type']}"
+                            )
+                            if is_selected:
+                                selected_questions.append(q)
+
+                if not selected_questions:
+                    st.info("☝️ Check questions")
+                else:
+                    st.success(f"✅ {len(selected_questions)} selected")
+
+                st.markdown("---")
+                st.markdown("#### 💬 Context (Optional)")
+
+                generation_prompt = st.text_area(
+                    "Prompt",
+                    value="""Watch video carefully. For multiple choice, select exact option. For description, be clear and concise.""",
+                    height=80,
+                    key=f"llm_answer_prompt_{project_id}_{user_id}",
+                    help="Add context for AI",
+                    label_visibility="collapsed"
+                )
+
+                st.markdown("---")
+
+                # Answer Questions
+                if st.button(
+                    "✨ Generate Answers",
+                    key=f"llm_answer_btn_{project_id}_{user_id}",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not api_key or not selected_questions
+                ):
+                    # Trigger answer generation
+                    answer_existing_questions_with_llm(
+                        project_id=project_id,
+                        user_id=user_id,
+                        api_key=api_key,
+                        model_name=selected_model,
+                        video=selected_video,
+                        questions=selected_questions,
+                        custom_prompt=generation_prompt,
+                        role=role
+                    )
+
+                st.caption("💡 Pre-fills answers for review")
+
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
 
 
 def generate_llm_annotations(
@@ -4409,7 +4551,7 @@ def display_instruction_tab_content(instructions_url: Optional[str], cheat_sheet
     # Display cheat sheet if available
     if cheat_sheet_markdown and cheat_sheet_markdown.strip():
         st.markdown("---")
-        with st.expander("📋 **Quick Reference Cheat Sheet**", expanded=True):
+        with st.expander("📋 **Quick Reference Cheat Sheet**", expanded=False):
             st.markdown(cheat_sheet_markdown, unsafe_allow_html=True)
     
 ###############################################################################
