@@ -11,6 +11,22 @@ from typing import Dict, Callable, Optional, List, Set
 from pathlib import Path
 import os
 
+def _same_source(fn_a: Callable, fn_b: Callable) -> bool:
+    """True if two functions have identical source (best-effort).
+
+    Used to treat duplicate verify.py definitions across workspaces as
+    harmless when they are byte-for-byte the same. Falls back to comparing
+    bytecode if source is unavailable.
+    """
+    try:
+        return inspect.getsource(fn_a) == inspect.getsource(fn_b)
+    except (OSError, TypeError):
+        try:
+            return fn_a.__code__.co_code == fn_b.__code__.co_code
+        except AttributeError:
+            return False
+
+
 class VerificationRegistry:
     """Registry for verification functions from multiple workspaces"""
     
@@ -42,19 +58,27 @@ class VerificationRegistry:
             
             # Register all functions from this module
             for name, obj in inspect.getmembers(verify_module):
-                if (inspect.isfunction(obj) and 
+                if (inspect.isfunction(obj) and
                     not name.startswith('_')):
-                    # Check for name collision
+                    # Name collision across workspaces: keep the first-registered
+                    # function instead of aborting this whole workspace. Aborting
+                    # made function availability depend on workspace load order,
+                    # which could leave a needed function (e.g. the one a shared
+                    # question group references) unregistered. Only warn when the
+                    # two definitions actually differ.
                     if name in self._functions:
                         existing_source = self._function_sources[name]
-                        raise ValueError(
-                            f"Function name collision: '{name}' is defined in both "
-                            f"'{existing_source}' and '{workspace_str}'. "
-                            f"Please rename one of the functions or use prefixed names."
+                        if _same_source(self._functions[name], obj):
+                            continue  # identical duplicate — silently keep first
+                        print(
+                            f"Warning: Verification function '{name}' is defined "
+                            f"differently in '{existing_source}' and '{workspace_str}'. "
+                            f"Keeping the definition from '{existing_source}'."
                         )
+                        continue
                     self._functions[name] = obj
                     self._function_sources[name] = workspace_str
-            
+
             self._loaded_workspaces.add(workspace_str)
             
         except Exception as e:
