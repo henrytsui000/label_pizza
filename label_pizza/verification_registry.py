@@ -149,7 +149,22 @@ def load_verification_config() -> List[str]:
 
 
 def auto_load_workspaces() -> None:
-    """Automatically load all workspaces from config"""
+    """Automatically load verification functions.
+
+    Loads the built-in functions bundled inside the package FIRST (via a
+    path relative to this file, so it is independent of the current working
+    directory and of per-machine verification_config.json), then any extra
+    workspaces listed in verification_config.json. This guarantees that
+    functions referenced by shared question groups (e.g. check_taxonomy_labeling)
+    are always available after a plain `git pull` + restart, even on machines
+    that don't have the external workspace folders.
+    """
+    # Built-in functions shipped with the package (cwd-independent).
+    builtin_dir = Path(__file__).resolve().parent / "builtin_verify"
+    if (builtin_dir / "verify.py").exists():
+        register_workspace(str(builtin_dir))
+
+    # Extra workspaces from the machine-local config (may add or override).
     workspace_paths = load_verification_config()
     for workspace_path in workspace_paths:
         if Path(workspace_path).exists():
