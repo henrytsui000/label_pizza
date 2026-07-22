@@ -51,48 +51,80 @@ def filter_disabled_options(original_options: list, display_values: list) -> tup
     return filtered_original, filtered_display
 
 
-@st.fragment
 def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: str, mode: str):
-    """Display a single video-answer pair - FULLY OPTIMIZED WITH SINGLE BATCH OPERATION"""
+    """Display a single video-answer pair.
+
+    The video and the answer column are rendered as SEPARATE fragments so that
+    submitting a question group reruns only the answer fragment. The video's
+    <iframe> is therefore not rebuilt on submit (no re-download / reload) and only
+    the answer area briefly shows Streamlit's running state instead of the whole pair.
+    """
+    video_col, answer_col = st.columns([1, 1])
+
+    with video_col:
+        _render_video_fragment(video, role)
+
+    with answer_col:
+        _render_answer_fragment(video, project_id, user_id, role, mode)
+
+
+@st.fragment
+def _render_video_fragment(video: Dict, role: str):
+    """Render only the video player. Isolated so answer submits don't reload the video."""
+    autoplay = st.session_state.get(f"{role}_autoplay", True)
+    loop = st.session_state.get(f"{role}_loop", True)
+    video_height = custom_video_player(video["url"], video["uid"], autoplay=autoplay, loop=loop, show_share_button=True)
+    # Share the computed height with the answer fragment (deterministic per aspect ratio),
+    # so the answer container can be sized without re-rendering the video.
+    st.session_state[f"video_height_{video['id']}_{role}"] = video_height
+
+
+@st.fragment
+def _render_answer_fragment(video: Dict, project_id: int, user_id: int, role: str, mode: str):
+    """Render the progress header + question-group tabs + submit forms.
+
+    Reruns in isolation on submit (fragment scope) so the sibling video fragment
+    is untouched. Re-fetches the batch data each rerun so answers/completion reflect
+    the just-submitted values.
+    """
     try:
         selected_annotators = st.session_state.get("selected_annotators", []) if role in ["reviewer", "meta_reviewer"] else None
-        
+
         with get_db_session() as session:
             bulk_video_data = GroundTruthService.get_complete_video_data_for_display(
                 video_id=video["id"], project_id=project_id, user_id=user_id, role=role, session=session,
                 selected_annotators=selected_annotators
             )
-        
+
         if not bulk_video_data:
             st.error("Error loading video data")
             return
-        
-        project = bulk_video_data["project"]
+
         question_groups = bulk_video_data["question_groups"]
-        
+
         # Apply custom question group order if set
         order_key = f"question_order_{project_id}_{role}"
         if order_key in st.session_state:
             custom_order = st.session_state[order_key]
             group_lookup = {group["ID"]: group for group in question_groups}
             question_groups = [group_lookup[group_id] for group_id in custom_order if group_id in group_lookup]
-        
+
         if not question_groups:
             custom_info("No question groups found for this project.")
             return
-        
+
         # Get completion status from batch data
         completion_status = bulk_video_data["completion_status_by_group"]
-        
+
         completed_count = sum(1 for group in question_groups if completion_status.get(group["ID"], False))
         total_count = len(question_groups)
-        
+
         completion_details = [
             f"✅ {group['Display Title']}" if completion_status.get(group["ID"], False)
             else f"<span style='color: #A1A1A1;'>{group['Display Title']}</span>"
             for group in question_groups
         ]
-        
+
         # Progress display format with anchor for scrolling
         st.markdown(f"""
         <div id="video_{video['id']}" style="{get_card_style('#B180FF')}text-align: center;">
@@ -101,48 +133,42 @@ def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: 
             </div>
         </div>
         """, unsafe_allow_html=True)
-        
-        # Two columns layout
-        video_col, answer_col = st.columns([1, 1])
-        
-        with video_col:
-            autoplay = st.session_state.get(f"{role}_autoplay", True)
-            loop = st.session_state.get(f"{role}_loop", True)
-            video_height = custom_video_player(video["url"], video["uid"], autoplay=autoplay, loop=loop, show_share_button=True)
-        
-        with answer_col:
-            # Check which groups have been completed
-            submission_key = f"completed_groups_{video['id']}_{project_id}_{role}"
-            
-            if submission_key not in st.session_state:
-                st.session_state[submission_key] = set()
-            
-            # Add completion indicators to tab names
-            tab_names = []
-            for group in question_groups:
-                group_id = group["ID"]
-                if group_id in st.session_state[submission_key]:
-                    tab_names.append(f"✅ {group['Display Title']}")
-                else:
-                    tab_names.append(f"📝 {group['Display Title']}")
-            
-            tabs = st.tabs(tab_names)
-            
-            for tab, group in zip(tabs, question_groups):
-                with tab:
-                    # Pass the bulk data to the existing function
-                    display_question_group_in_fixed_container(
-                        video=video, 
-                        project_id=project_id, 
-                        user_id=user_id, 
-                        group_id=group["ID"], 
-                        role=role, 
-                        mode=mode, 
-                        container_height=video_height,
-                        bulk_cache_data=bulk_video_data,
-                        group_index=question_groups.index(group)
-                    )
-        
+
+        # Height computed by the sibling video fragment (falls back to a sane default).
+        video_height = st.session_state.get(f"video_height_{video['id']}_{role}", 500)
+
+        # Check which groups have been completed
+        submission_key = f"completed_groups_{video['id']}_{project_id}_{role}"
+
+        if submission_key not in st.session_state:
+            st.session_state[submission_key] = set()
+
+        # Add completion indicators to tab names
+        tab_names = []
+        for group in question_groups:
+            group_id = group["ID"]
+            if group_id in st.session_state[submission_key]:
+                tab_names.append(f"✅ {group['Display Title']}")
+            else:
+                tab_names.append(f"📝 {group['Display Title']}")
+
+        tabs = st.tabs(tab_names)
+
+        for tab, group in zip(tabs, question_groups):
+            with tab:
+                # Pass the bulk data to the existing function
+                display_question_group_in_fixed_container(
+                    video=video,
+                    project_id=project_id,
+                    user_id=user_id,
+                    group_id=group["ID"],
+                    role=role,
+                    mode=mode,
+                    container_height=video_height,
+                    bulk_cache_data=bulk_video_data,
+                    group_index=question_groups.index(group)
+                )
+
         if st.session_state.get(f"rerun_needed_{project_id}_{user_id}", False):
             del st.session_state[f"rerun_needed_{project_id}_{user_id}"]
             try:
@@ -150,7 +176,7 @@ def display_video_answer_pair(video: Dict, project_id: int, user_id: int, role: 
             except Exception as e:
                 print(f"Error rerunning fragment: {e}")
                 st.rerun()
-                    
+
     except ValueError as e:
         st.error(f"Error loading project data: {str(e)}")
         if st.button("🔄 Refresh Page", key=f"refresh_{video['id']}_{project_id}"):
@@ -1446,35 +1472,41 @@ def _display_single_answer_elegant(answer, text_key, question_text, answer_revie
 def submit_answer_reviews(answer_reviews: Dict, video_id: int, project_id: int, user_id: int):
     """Submit answer reviews for annotators using proper service API"""
     with get_db_session() as session:
+        # Fetch once instead of per (question x annotator): get_answers returns ALL
+        # answers for this video, and the annotator map is cached — both were previously
+        # re-fetched inside the nested loops (an N+1 on every ground-truth submit).
+        annotators = get_optimized_all_project_annotators(project_id=project_id)
+        display_to_user_id = {
+            display_name: info.get('id') for display_name, info in annotators.items()
+        }
+        answers_df = AnnotatorService.get_answers(video_id=video_id, project_id=project_id, session=session)
+        question_cache = {}
+
         for question_text, reviews in answer_reviews.items():
             for annotator_display, review_data in reviews.items():
                 review_status = review_data.get("status", "pending") if isinstance(review_data, dict) else review_data
-                
+
                 if review_status in ["approved", "rejected", "pending"]:
                     try:
-                        # OPTIMIZED: Use cached annotator lookup
-                        annotators = get_optimized_all_project_annotators(project_id=project_id)
-                        annotator_user_id = None
-                        
-                        for display_name, annotator_info in annotators.items():
-                            if display_name == annotator_display:
-                                annotator_user_id = annotator_info.get('id')
-                                break
-                        
+                        annotator_user_id = display_to_user_id.get(annotator_display)
+
                         if annotator_user_id:
-                            question = QuestionService.get_question_by_text(text=question_text, session=session)
-                            answers_df = AnnotatorService.get_answers(video_id=video_id, project_id=project_id, session=session)
-                            
+                            if question_text not in question_cache:
+                                question_cache[question_text] = QuestionService.get_question_by_text(
+                                    text=question_text, session=session
+                                )
+                            question = question_cache[question_text]
+
                             if not answers_df.empty:
                                 answer_row = answers_df[
-                                    (answers_df["Question ID"] == int(question["id"])) & 
+                                    (answers_df["Question ID"] == int(question["id"])) &
                                     (answers_df["User ID"] == int(annotator_user_id))
                                 ]
-                                
+
                                 if not answer_row.empty:
                                     answer_id = int(answer_row.iloc[0]["Answer ID"])
                                     GroundTruthService.submit_answer_review(
-                                        answer_id=answer_id, reviewer_id=user_id, 
+                                        answer_id=answer_id, reviewer_id=user_id,
                                         status=review_status, session=session
                                     )
                     except Exception as e:
