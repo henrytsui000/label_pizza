@@ -6651,22 +6651,28 @@ class GroundTruthService(BaseAnswerService):
             # Get ALL questions for this project at once
             all_questions = ProjectService.get_project_questions(project_id=project_id, session=session)
             
-            # Organize questions by group
+            # Organize questions by group.
+            # Single batched query for all question->group assignments instead of
+            # one query per question (was N+1: e.g. 13 round-trips for a 13-question
+            # project on every render/submit). Original question order is preserved
+            # within each group by iterating all_questions (not the assignment rows).
             questions_by_group = {}
             question_id_to_group = {}
-            all_question_ids = set()
-            
-            for question in all_questions:
-                all_question_ids.add(question["id"])
-                
-                # Find which groups this question belongs to
-                group_assignments = session.scalars(
+            all_question_ids = {question["id"] for question in all_questions}
+
+            groups_by_question_id = {}
+            if all_question_ids:
+                assignments = session.scalars(
                     select(QuestionGroupQuestion)
-                    .where(QuestionGroupQuestion.question_id == question["id"])
+                    .where(QuestionGroupQuestion.question_id.in_(all_question_ids))
                 ).all()
-                
-                for assignment in group_assignments:
-                    group_id = assignment.question_group_id
+                for assignment in assignments:
+                    groups_by_question_id.setdefault(
+                        assignment.question_id, []
+                    ).append(assignment.question_group_id)
+
+            for question in all_questions:
+                for group_id in groups_by_question_id.get(question["id"], []):
                     if group_id not in questions_by_group:
                         questions_by_group[group_id] = []
                     questions_by_group[group_id].append(question)
